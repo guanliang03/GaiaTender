@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import base64
+import os
+
 import pandas as pd
 import streamlit as st
 
@@ -66,11 +69,39 @@ def render(df_master: pd.DataFrame) -> None:
 
     st.divider()
 
-    # ── PDF download ──────────────────────────────────────────────────────────
+    # ── Submission PDF attachment ──────────────────────────────────────────
+    pdf_path = str(row.get("pdf_path", "") or "")
+    if pdf_path and os.path.isfile(pdf_path):
+        st.subheader("📎 Submission PDF")
+        with open(pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+        b64 = base64.b64encode(pdf_bytes).decode()
+        filename = os.path.basename(pdf_path)
+
+        col_dl, _ = st.columns([1, 3])
+        col_dl.download_button(
+            "⬇️ Download Submission PDF",
+            data=pdf_bytes,
+            file_name=filename,
+            mime="application/pdf",
+        )
+
+        # Inline preview (works in most browsers)
+        pdf_display = (
+            f'<iframe src="data:application/pdf;base64,{b64}" '
+            f'width="100%" height="700px" style="border:none;border-radius:8px;"></iframe>'
+        )
+        st.markdown(pdf_display, unsafe_allow_html=True)
+    elif pdf_path:
+        st.warning("⚠️ Submission PDF was recorded but the file could not be found on disk.")
+
+    st.divider()
+
+    # ── PDF download ──────────────────────────────────────────────────────
     rules_summary = result.insight_str
     pdf = build_pdf_report(row, risk, hist_str, None, "", rules_summary)
     st.download_button(
-        "📥 Download PDF Report",
+        "📥 Download AI Report (PDF)",
         data=pdf,
         file_name=f"report_{sel.replace(' ', '_')}.pdf",
         mime="application/pdf",

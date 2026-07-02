@@ -27,13 +27,15 @@ def render(df_master: pd.DataFrame) -> None:
 
 
 def _render_editor(df: pd.DataFrame) -> pd.DataFrame:
+    # All columns except "id" — id is kept in the df for save/delete but never shown
+    visible_cols = [c for c in df.columns if c != "id"]
     return st.data_editor(
         df,
         hide_index=True,
         num_rows="fixed",
         use_container_width=True,
+        column_order=visible_cols,
         column_config={
-            "id":               st.column_config.NumberColumn(disabled=True, width="small"),
             "value":            st.column_config.NumberColumn("Budget",   format="RM %d"),
             "win_prob":         st.column_config.ProgressColumn(
                                     "AI Prob %", format="%d%%", min_value=0, max_value=100

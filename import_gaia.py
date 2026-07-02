@@ -263,14 +263,18 @@ def import_csv(csv_path: Path, df_existing: pd.DataFrame, staff_set: set[str]) -
 
 
 def _wipe_tenders() -> None:
-    """Delete ALL rows from the tenders table so a re-import starts clean."""
-    import sqlite3
-    from config import DB_FILE
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute("DELETE FROM tenders")
-    conn.execute("DELETE FROM staff")
-    conn.commit()
-    conn.close()
+    """Delete ALL documents from the tenders and staff collections in Firestore so a re-import starts clean."""
+    from database import db
+    
+    # Wipe tenders
+    tenders_ref = db.collection("tenders")
+    for doc in tenders_ref.stream():
+        doc.reference.delete()
+        
+    # Wipe staff
+    staff_ref = db.collection("staff")
+    for doc in staff_ref.stream():
+        doc.reference.delete()
 
 
 def main() -> None:

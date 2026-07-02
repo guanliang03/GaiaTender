@@ -7,18 +7,19 @@
 #   1. KPI Summary Row
 #   2. Win Rate by Salesperson
 #   3. Win Rate by Institution / Client
-#   4. Win Rate by Submission Method
+#   4. Outcome Breakdown (donut charts)
 #   5. Deal Value Distribution
 #   6. Monthly Submission Trend
 #   7. Raw data explorer
+#
+# All charts use Plotly for interactive hover tooltips.
 # ─────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
 
-import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 
@@ -31,6 +32,20 @@ _PURPLE = "#9b59b6"
 _GREY   = "#95a5a6"
 _BG     = "#1a1a2e"
 _CARD   = "#16213e"
+_GRID   = "#333355"
+
+_PLOTLY_LAYOUT = dict(
+    paper_bgcolor=_BG,
+    plot_bgcolor=_CARD,
+    font=dict(color="white", family="Inter, sans-serif"),
+    margin=dict(l=10, r=10, t=40, b=10),
+    hoverlabel=dict(
+        bgcolor="#0f3460",
+        bordercolor="#3498db",
+        font_size=13,
+        font_family="Inter, sans-serif",
+    ),
+)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -48,58 +63,92 @@ def _win_rate_table(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     total = grp.size().rename("Total")
     wins  = closed[closed["status"] == "Won"].groupby(group_col).size().rename("Won")
     tbl   = pd.concat([total, wins], axis=1).reset_index()
+    tbl["Won"]      = tbl["Won"].fillna(0).astype(int)
     tbl["Lost"]     = tbl["Total"] - tbl["Won"]
     tbl["Win Rate"] = (tbl["Won"] / tbl["Total"] * 100).round(1)
     return tbl.sort_values("Win Rate", ascending=False).reset_index(drop=True)
 
 
-def _bar_chart(
-    labels: list[str],
-    values: list[float],
+def _plotly_hbar(
+    tbl: pd.DataFrame,
+    label_col: str,
+    overall_wr: float,
     title: str,
-    color: str = _BLUE,
-    ylabel: str = "Win Rate (%)",
-    fmt: str = "{:.1f}%",
-    figsize: tuple = (8, 4),
-) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=figsize, facecolor=_BG)
-    ax.set_facecolor(_CARD)
+    above_color: str = _GREEN,
+    below_color: str = _RED,
+    height_per_row: int = 38,
+) -> go.Figure:
+    """Horizontal bar chart with hover showing rate, won, lost, total."""
+    colours = [above_color if wr >= overall_wr else below_color for wr in tbl["Win Rate"]]
+    labels  = tbl[label_col].tolist()
+    rates   = tbl["Win Rate"].tolist()
+    wons    = tbl["Won"].tolist()
+    losts   = tbl["Lost"].tolist()
+    totals  = tbl["Total"].tolist()
 
-    y_pos = np.arange(len(labels))
-    bars  = ax.barh(y_pos, values, color=color, height=0.6, zorder=2)
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels(labels, fontsize=9, color="white")
-    ax.invert_yaxis()
-    ax.set_xlabel(ylabel, color="white", fontsize=9)
-    ax.set_title(title, color="white", fontsize=11, pad=10)
-    ax.tick_params(colors="white")
-    for spine in ax.spines.values():
-        spine.set_color("#333355")
-    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.0f}"))
-    ax.grid(axis="x", color="#333355", linewidth=0.5, zorder=1)
+    hover = [
+        f"<b>{lbl}</b><br>"
+        f"Win Rate: <b>{wr:.1f}%</b><br>"
+        f"Won: {w} | Lost: {l} | Total: {t}"
+        for lbl, wr, w, l, t in zip(labels, rates, wons, losts, totals)
+    ]
 
-    for bar, val in zip(bars, values):
-        ax.text(
-            bar.get_width() + max(values) * 0.01, bar.get_y() + bar.get_height() / 2,
-            fmt.format(val), va="center", ha="left", fontsize=8, color="white"
-        )
-    fig.tight_layout()
+    fig = go.Figure(go.Bar(
+        x=rates,
+        y=labels,
+        orientation="h",
+        marker_color=colours,
+        text=[f"{r:.1f}%" for r in rates],
+        textposition="outside",
+        textfont=dict(color="white", size=11),
+        hovertemplate="%{customdata}<extra></extra>",
+        customdata=hover,
+    ))
+
+    chart_h = max(280, len(labels) * height_per_row + 80)
+    fig.update_layout(
+        **_PLOTLY_LAYOUT,
+        title=dict(text=title, font=dict(size=14)),
+        xaxis=dict(
+            title="Win Rate (%)",
+            color="white",
+            gridcolor=_GRID,
+            ticksuffix="%",
+            range=[0, max(rates) * 1.2 if rates else 100],
+        ),
+        yaxis=dict(
+            color="white",
+            autorange="reversed",
+            tickfont=dict(size=10),
+        ),
+        height=chart_h,
+        showlegend=False,
+    )
     return fig
 
 
-def _donut(labels: list[str], sizes: list[float], colors: list[str], title: str) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(4, 4), facecolor=_BG)
-    ax.set_facecolor(_BG)
-    wedges, texts, autotexts = ax.pie(
-        sizes, labels=labels, autopct="%1.1f%%", startangle=90,
-        colors=colors, pctdistance=0.8, wedgeprops=dict(width=0.5),
+def _plotly_donut(
+    labels: list[str],
+    values: list[float],
+    colors: list[str],
+    title: str,
+) -> go.Figure:
+    """Donut chart with hover showing label, value, and percentage."""
+    fig = go.Figure(go.Pie(
+        labels=labels,
+        values=values,
+        hole=0.5,
+        marker=dict(colors=colors, line=dict(color=_BG, width=2)),
+        textinfo="label+percent",
+        textfont=dict(color="white", size=12),
+        hovertemplate="<b>%{label}</b><br>Count / Value: %{value:,.0f}<br>Share: %{percent}<extra></extra>",
+    ))
+    fig.update_layout(
+        **_PLOTLY_LAYOUT,
+        title=dict(text=title, font=dict(size=13)),
+        legend=dict(font=dict(color="white"), bgcolor=_CARD),
+        height=380,
     )
-    for t in texts:
-        t.set_color("white"); t.set_fontsize(9)
-    for at in autotexts:
-        at.set_color("white"); at.set_fontsize(8)
-    ax.set_title(title, color="white", fontsize=11, pad=10)
-    fig.tight_layout()
     return fig
 
 
@@ -126,7 +175,6 @@ def render(df: pd.DataFrame) -> None:
     pending    = total_all - total_cl
     overall_wr = total_won / total_cl * 100 if total_cl else 0
     total_val  = closed[closed["status"] == "Won"]["value"].sum()
-    avg_val    = closed[closed["status"] == "Won"]["value"].mean() if total_won else 0
 
     k1, k2, k3, k4, k5, k6 = st.columns(6)
     k1.metric("Total Tenders",   f"{total_all:,}")
@@ -145,17 +193,15 @@ def render(df: pd.DataFrame) -> None:
     if not sp_tbl.empty:
         col_chart, col_table = st.columns([3, 2])
         with col_chart:
-            # Colour bars: green if above average, red if below
-            colours = [_GREEN if wr >= overall_wr else _RED for wr in sp_tbl["Win Rate"]]
-            fig = _bar_chart(
-                sp_tbl["assignee"].tolist(),
-                sp_tbl["Win Rate"].tolist(),
+            fig = _plotly_hbar(
+                sp_tbl.rename(columns={"assignee": "Salesperson"}),
+                "Salesperson",
+                overall_wr,
                 "Win Rate by Salesperson (%)",
-                color=colours,
-                figsize=(7, max(4, len(sp_tbl) * 0.45)),
+                above_color=_GREEN,
+                below_color=_RED,
             )
-            st.pyplot(fig)
-            plt.close(fig)
+            st.plotly_chart(fig, use_container_width=True)
         with col_table:
             display = sp_tbl.rename(columns={"assignee": "Salesperson"})
             st.dataframe(
@@ -170,7 +216,6 @@ def render(df: pd.DataFrame) -> None:
     inst_tbl = _win_rate_table(df, "client_name")
 
     if not inst_tbl.empty:
-        # Show top 15 by volume, not just win rate, for relevance
         top_inst = (
             inst_tbl.sort_values("Total", ascending=False)
             .head(15)
@@ -179,16 +224,15 @@ def render(df: pd.DataFrame) -> None:
 
         col_chart2, col_table2 = st.columns([3, 2])
         with col_chart2:
-            colours2 = [_GREEN if wr >= overall_wr else _ORANGE for wr in top_inst["Win Rate"]]
-            fig2 = _bar_chart(
-                top_inst["client_name"].tolist(),
-                top_inst["Win Rate"].tolist(),
+            fig2 = _plotly_hbar(
+                top_inst.rename(columns={"client_name": "Institution"}),
+                "Institution",
+                overall_wr,
                 "Win Rate by Institution — Top 15 by Volume (%)",
-                color=colours2,
-                figsize=(7, max(4, len(top_inst) * 0.45)),
+                above_color=_GREEN,
+                below_color=_ORANGE,
             )
-            st.pyplot(fig2)
-            plt.close(fig2)
+            st.plotly_chart(fig2, use_container_width=True)
         with col_table2:
             display2 = inst_tbl.rename(columns={"client_name": "Institution"})
             st.dataframe(
@@ -198,38 +242,37 @@ def render(df: pd.DataFrame) -> None:
 
     st.divider()
 
-    # ── 4. Win / Lost outcome donut  ──────────────────────────────────────────
+    # ── 4. Outcome donut charts ────────────────────────────────────────────────
     st.markdown("### 📊 Outcome Breakdown")
     c_pie1, c_pie2 = st.columns(2)
 
     with c_pie1:
-        fig3 = _donut(
+        fig3 = _plotly_donut(
             ["Won", "Lost"],
             [total_won, total_lost],
             [_GREEN, _RED],
             "Overall Outcome (Closed Tenders)",
         )
-        st.pyplot(fig3)
-        plt.close(fig3)
+        st.plotly_chart(fig3, use_container_width=True)
 
     with c_pie2:
-        # Submission method breakdown from original data if available
-        # We map Submission_Method → stored in primary_factor (workaround)
-        # Instead: show won value distribution by assignee top 5
         top5 = (
             closed[closed["status"] == "Won"]
             .groupby("assignee")["value"].sum()
             .nlargest(5)
         )
         if not top5.empty:
-            fig4 = _donut(
+            fig4 = _plotly_donut(
                 top5.index.tolist(),
                 top5.values.tolist(),
                 [_GREEN, _BLUE, _ORANGE, _PURPLE, _GREY],
                 "Won Contract Value — Top 5 Salespeople",
             )
-            st.pyplot(fig4)
-            plt.close(fig4)
+            # Override hover for value chart to show RM
+            fig4.update_traces(
+                hovertemplate="<b>%{label}</b><br>Won Value: RM %{value:,.0f}<br>Share: %{percent}<extra></extra>"
+            )
+            st.plotly_chart(fig4, use_container_width=True)
 
     st.divider()
 
@@ -239,63 +282,119 @@ def render(df: pd.DataFrame) -> None:
     lost_vals = closed[closed["status"] == "Lost"]["value"].dropna()
 
     if not won_vals.empty:
-        fig5, ax5 = plt.subplots(figsize=(9, 4), facecolor=_BG)
-        ax5.set_facecolor(_CARD)
-        bins = np.linspace(0, min(closed["value"].max(), 2_000_000), 30)
-        ax5.hist(won_vals,  bins=bins, alpha=0.7, color=_GREEN,  label="Won",  zorder=2)
-        ax5.hist(lost_vals, bins=bins, alpha=0.7, color=_RED,    label="Lost", zorder=2)
-        ax5.set_xlabel("Tender Value (RM)", color="white")
-        ax5.set_ylabel("Count",            color="white")
-        ax5.set_title("Distribution of Won vs Lost Tender Values", color="white", fontsize=11)
-        ax5.tick_params(colors="white")
-        ax5.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"RM {x/1000:.0f}K"))
-        for spine in ax5.spines.values():
-            spine.set_color("#333355")
-        ax5.legend(facecolor=_CARD, edgecolor="#333355", labelcolor="white")
-        ax5.grid(axis="y", color="#333355", linewidth=0.5, zorder=1)
-        fig5.tight_layout()
-        st.pyplot(fig5)
-        plt.close(fig5)
+        cap = min(closed["value"].max(), 2_000_000)
+        bins = np.linspace(0, cap, 31)
+
+        won_counts,  won_edges  = np.histogram(won_vals,  bins=bins)
+        lost_counts, lost_edges = np.histogram(lost_vals, bins=bins)
+
+        def _bin_label(edges: np.ndarray, i: int) -> str:
+            lo = edges[i] / 1000
+            hi = edges[i + 1] / 1000
+            return f"RM {lo:.0f}K – {hi:.0f}K"
+
+        won_hover  = [f"<b>{_bin_label(won_edges,  i)}</b><br>Won:  {c} tenders" for i, c in enumerate(won_counts)]
+        lost_hover = [f"<b>{_bin_label(lost_edges, i)}</b><br>Lost: {c} tenders" for i, c in enumerate(lost_counts)]
+        bin_centres = (bins[:-1] + bins[1:]) / 2
+
+        fig5 = go.Figure()
+        fig5.add_trace(go.Bar(
+            x=bin_centres,
+            y=won_counts,
+            name="Won",
+            marker_color=_GREEN,
+            opacity=0.8,
+            hovertemplate="%{customdata}<extra></extra>",
+            customdata=won_hover,
+        ))
+        fig5.add_trace(go.Bar(
+            x=bin_centres,
+            y=lost_counts,
+            name="Lost",
+            marker_color=_RED,
+            opacity=0.8,
+            hovertemplate="%{customdata}<extra></extra>",
+            customdata=lost_hover,
+        ))
+        fig5.update_layout(
+            **_PLOTLY_LAYOUT,
+            title=dict(text="Distribution of Won vs Lost Tender Values", font=dict(size=14)),
+            barmode="overlay",
+            xaxis=dict(
+                title="Tender Value (RM)",
+                color="white",
+                gridcolor=_GRID,
+                tickformat=",.0f",
+                tickprefix="RM ",
+            ),
+            yaxis=dict(title="Count", color="white", gridcolor=_GRID),
+            legend=dict(font=dict(color="white"), bgcolor=_CARD),
+            height=380,
+        )
+        st.plotly_chart(fig5, use_container_width=True)
 
     st.divider()
 
-    # ── 6. Deadline / submission trend ─────────────────────────────────────────
+    # ── 6. Monthly submission trend ────────────────────────────────────────────
     st.markdown("### 📅 Monthly Submission Trend")
     df_trend = df.copy()
     df_trend["deadline"] = pd.to_datetime(df_trend["deadline"], errors="coerce")
+    # Drop outlier dates before year 2000 (e.g. 1990 bad data entries)
+    df_trend = df_trend[df_trend["deadline"].dt.year >= 2000]
     df_trend["month"]    = df_trend["deadline"].dt.to_period("M")
     trend = df_trend.groupby(["month", "status"]).size().unstack(fill_value=0)
 
     if not trend.empty:
         trend.index = trend.index.astype(str)
-        fig6, ax6 = plt.subplots(figsize=(11, 4), facecolor=_BG)
-        ax6.set_facecolor(_CARD)
+        months = trend.index.tolist()
 
-        if "Won"  in trend.columns:
-            ax6.bar(trend.index, trend["Won"],  color=_GREEN, label="Won",    zorder=2)
-        if "Lost" in trend.columns:
-            ax6.bar(trend.index, trend["Lost"],
-                    bottom=trend.get("Won", pd.Series(0, index=trend.index)),
-                    color=_RED, label="Lost", zorder=2)
+        won_col  = trend["Won"].tolist()  if "Won"  in trend.columns else [0] * len(months)
+        lost_col = trend["Lost"].tolist() if "Lost" in trend.columns else [0] * len(months)
         other_cols = [c for c in trend.columns if c not in ("Won", "Lost")]
-        if other_cols:
-            base = trend.get("Won", pd.Series(0, index=trend.index)) + \
-                   trend.get("Lost", pd.Series(0, index=trend.index))
-            ax6.bar(trend.index, trend[other_cols].sum(axis=1),
-                    bottom=base, color=_GREY, label="Other", zorder=2)
+        other_col = trend[other_cols].sum(axis=1).tolist() if other_cols else [0] * len(months)
 
-        ax6.set_xlabel("Month", color="white")
-        ax6.set_ylabel("No. of Tenders", color="white")
-        ax6.set_title("Tenders by Month (stacked: Won / Lost / Other)", color="white", fontsize=11)
-        ax6.tick_params(colors="white", axis="both")
-        plt.xticks(rotation=45, ha="right", fontsize=8)
-        for spine in ax6.spines.values():
-            spine.set_color("#333355")
-        ax6.legend(facecolor=_CARD, edgecolor="#333355", labelcolor="white")
-        ax6.grid(axis="y", color="#333355", linewidth=0.5, zorder=1)
-        fig6.tight_layout()
-        st.pyplot(fig6)
-        plt.close(fig6)
+        won_hover   = [f"<b>{m}</b><br>Won: {w}" for m, w in zip(months, won_col)]
+        lost_hover  = [f"<b>{m}</b><br>Lost: {l}" for m, l in zip(months, lost_col)]
+        other_hover = [f"<b>{m}</b><br>Other/Pending: {o}" for m, o in zip(months, other_col)]
+
+        fig6 = go.Figure()
+        fig6.add_trace(go.Bar(
+            x=months, y=won_col,
+            name="Won",
+            marker_color=_GREEN,
+            hovertemplate="%{customdata}<extra></extra>",
+            customdata=won_hover,
+        ))
+        fig6.add_trace(go.Bar(
+            x=months, y=lost_col,
+            name="Lost",
+            marker_color=_RED,
+            hovertemplate="%{customdata}<extra></extra>",
+            customdata=lost_hover,
+        ))
+        if any(o > 0 for o in other_col):
+            fig6.add_trace(go.Bar(
+                x=months, y=other_col,
+                name="Other",
+                marker_color=_GREY,
+                hovertemplate="%{customdata}<extra></extra>",
+                customdata=other_hover,
+            ))
+        fig6.update_layout(
+            **_PLOTLY_LAYOUT,
+            title=dict(text="Tenders by Month (stacked: Won / Lost / Other)", font=dict(size=14)),
+            barmode="stack",
+            xaxis=dict(
+                title="Month",
+                color="white",
+                gridcolor=_GRID,
+                tickangle=-45,
+            ),
+            yaxis=dict(title="No. of Tenders", color="white", gridcolor=_GRID),
+            legend=dict(font=dict(color="white"), bgcolor=_CARD),
+            height=400,
+        )
+        st.plotly_chart(fig6, use_container_width=True)
 
     st.divider()
 

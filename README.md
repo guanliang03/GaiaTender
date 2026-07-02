@@ -2,7 +2,7 @@
 
 ## Quick Start
 ```bash
-pip install streamlit pandas altair matplotlib reportlab openpyxl numpy
+pip install streamlit pandas altair matplotlib reportlab openpyxl "numpy<2" "scipy<1.12" pypdfium2 easyocr
 streamlit run app.py
 ```
 

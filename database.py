@@ -1,153 +1,148 @@
 # database.py
 # ─────────────────────────────────────────────────────────────────────────────
-# SQLite schema, CRUD helpers.
+# Firebase Firestore schema and CRUD helpers.
 # No seed / dummy data — the DB starts empty.
-# Zero Streamlit dependency.
+# Zero Streamlit dependency (except dynamic initialisation support).
 # ─────────────────────────────────────────────────────────────────────────────
 
-import sqlite3
-
+import os
+import firebase_admin
+from firebase_admin import credentials, firestore
 import pandas as pd
 
-from config import DB_FILE
+from config import FIREBASE_SERVICE_ACCOUNT_KEY
+
+# ── Safe Firebase Admin SDK Initialisation ────────────────────────────────────
+
+if not firebase_admin._apps:
+    try:
+        # Check if the service account key file exists
+        if os.path.exists(FIREBASE_SERVICE_ACCOUNT_KEY):
+            cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_KEY)
+            firebase_admin.initialize_app(cred)
+        else:
+            # Fallback: Attempt to use environment / default credentials (ADC)
+            firebase_admin.initialize_app()
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to initialise Firebase Admin SDK.\n"
+            f"Please verify that the service account JSON file is placed at "
+            f"'{FIREBASE_SERVICE_ACCOUNT_KEY}' or credentials are set in the environment.\n"
+            f"Error details: {e}"
+        )
+
+db = firestore.client()
 
 
-# ── Schema ────────────────────────────────────────────────────────────────────
+# ── Schema / Connection Initialisation ────────────────────────────────────────
 
 def init_db() -> None:
-    """Create tables if they do not already exist. Migrate schema if needed."""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS tenders (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_name      TEXT    NOT NULL,
-            client_name       TEXT    NOT NULL,
-            value             REAL    NOT NULL,
-            win_prob          REAL    DEFAULT 0,
-            status            TEXT    NOT NULL DEFAULT 'Qualified Lead',
-            primary_factor    TEXT    NOT NULL,
-            assignee          TEXT    NOT NULL,
-            starting_date     DATE,
-            deadline          DATE    NOT NULL,
-            submission_method TEXT,
-            product_brand     TEXT,
-            product_model     TEXT
-        )
-    """)
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS staff (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            name       TEXT UNIQUE NOT NULL,
-            department TEXT
-        )
-    """)
-
-    # ── Migrate: remove bid_amount / add new columns if upgrading old DB ──────
-    c.execute("PRAGMA table_info(tenders)")
-    existing_cols = {row[1] for row in c.fetchall()}
-
-    if "bid_amount" in existing_cols:
-        # Recreate table without bid_amount, preserving all data
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS tenders_new (
-                id                INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_name      TEXT    NOT NULL,
-                client_name       TEXT    NOT NULL,
-                value             REAL    NOT NULL,
-                win_prob          REAL    DEFAULT 0,
-                status            TEXT    NOT NULL DEFAULT 'Qualified Lead',
-                primary_factor    TEXT    NOT NULL,
-                assignee          TEXT    NOT NULL,
-                starting_date     DATE,
-                deadline          DATE    NOT NULL,
-                submission_method TEXT,
-                product_brand     TEXT,
-                product_model     TEXT
-            )
-        """)
-        c.execute("""
-            INSERT INTO tenders_new
-                (id, project_name, client_name, value, win_prob, status,
-                 primary_factor, assignee, deadline)
-            SELECT id, project_name, client_name, value, win_prob, status,
-                   primary_factor, assignee, deadline
-            FROM tenders
-        """)
-        c.execute("DROP TABLE tenders")
-        c.execute("ALTER TABLE tenders_new RENAME TO tenders")
-
-    else:
-        # Add any missing new columns to an existing up-to-date table
-        for col, typedef in [
-            ("starting_date",     "DATE"),
-            ("submission_method", "TEXT"),
-            ("product_brand",     "TEXT"),
-            ("product_model",     "TEXT"),
-        ]:
-            if col not in existing_cols:
-                c.execute(f"ALTER TABLE tenders ADD COLUMN {col} {typedef}")
-
-    conn.commit()
-    conn.close()
+    """
+    Ensure the Firestore client connection is active.
+    Collections are created implicitly on write, so no DDL migration is required.
+    """
+    # The client is already initialised. We perform a quick ping/check.
+    try:
+        db.collections()
+    except Exception as e:
+        raise ConnectionError(f"Could not connect to Firebase Firestore: {e}")
 
 
 # ── Read helpers ──────────────────────────────────────────────────────────────
 
 def load_tenders() -> pd.DataFrame:
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql("SELECT * FROM tenders ORDER BY id DESC", conn)
-    conn.close()
-    if not df.empty:
-        for col in ("deadline", "starting_date"):
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
-    return df
+    """
+    Load all tenders from the Firestore 'tenders' collection.
+    Returns a pandas DataFrame sorted by the 'created_at' field descending.
+    """
+    tenders_ref = db.collection("tenders")
+    docs = tenders_ref.stream()
+
+    rows = []
+    for doc in docs:
+        data = doc.to_dict()
+        data["id"] = doc.id
+        rows.append(data)
+
+    df = pd.DataFrame(rows)
+
+    required_cols = [
+        "id", "project_name", "client_name", "value", "win_prob", "status",
+        "primary_factor", "assignee", "starting_date", "deadline",
+        "submission_method", "product_brand", "product_model", "pdf_path"
+    ]
+
+    if df.empty:
+        # Return empty DataFrame with correct column structure
+        return pd.DataFrame(columns=required_cols)
+
+    # Sort in memory by created_at descending if available (SQLite had "ORDER BY id DESC")
+    if "created_at" in df.columns:
+        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+        df = df.sort_values(by="created_at", ascending=False)
+
+    # Convert deadline and starting_date fields back to datetime.date objects for the app
+    for col in ("deadline", "starting_date"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+
+    # Ensure all required columns are present (fill missing ones with None/NaN)
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = None
+
+    # Reorder columns to align with the expected schema
+    return df[required_cols]
 
 
 def get_all_staff() -> list[str]:
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql("SELECT name FROM staff ORDER BY name", conn)
-    conn.close()
-    return df["name"].tolist()
+    """
+    Load all staff names from the Firestore 'staff' collection.
+    Returns a list of names sorted alphabetically.
+    """
+    staff_ref = db.collection("staff")
+    docs = staff_ref.stream()
+    names = []
+    for doc in docs:
+        data = doc.to_dict()
+        if "name" in data:
+            names.append(data["name"])
+    return sorted(names)
 
 
 def db_is_empty() -> bool:
-    """True when both tenders and staff tables have zero rows."""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT count(*) FROM tenders")
-    t = c.fetchone()[0]
-    c.execute("SELECT count(*) FROM staff")
-    s = c.fetchone()[0]
-    conn.close()
-    return t == 0 and s == 0
+    """True when both tenders and staff collections have zero documents."""
+    tenders_empty = len(db.collection("tenders").limit(1).get()) == 0
+    staff_empty = len(db.collection("staff").limit(1).get()) == 0
+    return tenders_empty and staff_empty
 
 
 # ── Write helpers ─────────────────────────────────────────────────────────────
 
 def add_staff(name: str, department: str) -> bool:
-    """Insert a new staff member. Returns False on duplicate name."""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        conn.execute(
-            "INSERT INTO staff (name, department) VALUES (?, ?)", (name, department)
-        )
-        conn.commit()
-        conn.close()
-        return True
-    except sqlite3.IntegrityError:
+    """
+    Insert a new staff member (name normalised to Title Case).
+    Uses the normalised name as document ID to guarantee uniqueness.
+    Returns False on duplicate.
+    """
+    norm_name = name.strip().title()
+    doc_ref = db.collection("staff").document(norm_name)
+    
+    # Check if duplicate exists
+    if doc_ref.get().exists:
         return False
+        
+    doc_ref.set({
+        "name": norm_name,
+        "department": department
+    })
+    return True
 
 
 def delete_staff(name: str) -> None:
     """Delete a staff member by name."""
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute("DELETE FROM staff WHERE name=?", (name,))
-    conn.commit()
-    conn.close()
+    norm_name = name.strip().title()
+    db.collection("staff").document(norm_name).delete()
 
 
 def add_tender(
@@ -163,24 +158,50 @@ def add_tender(
     submission_method: str = "",
     product_brand: str = "",
     product_model: str = "",
-) -> None:
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute(
-        """INSERT INTO tenders
-           (project_name, client_name, value, win_prob, status, primary_factor,
-            assignee, starting_date, deadline, submission_method,
-            product_brand, product_model)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (project, client_name, value, win_prob, status, factor, assignee,
-         str(starting_date) if starting_date else None,
-         str(deadline), submission_method, product_brand, product_model),
-    )
-    conn.commit()
-    conn.close()
+    pdf_path: str = "",
+) -> bool:
+    """
+    Insert a tender document.
+    Silently skips if an identical (project_name, client_name, deadline) already exists.
+    Returns True when inserted, False when skipped as duplicate.
+    """
+    p_name = project.strip()
+    c_name = client_name.strip()
+    dl_str = str(deadline)
+
+    # Replicate unique constraint query
+    duplicates = db.collection("tenders") \
+        .where("project_name", "==", p_name) \
+        .where("client_name", "==", c_name) \
+        .where("deadline", "==", dl_str) \
+        .limit(1).get()
+
+    if len(duplicates) > 0:
+        return False
+
+    # Insert new document with automatic ID and server creation timestamp
+    doc_ref = db.collection("tenders").document()
+    doc_ref.set({
+        "project_name": p_name,
+        "client_name": c_name,
+        "value": float(value),
+        "win_prob": float(win_prob),
+        "status": status,
+        "primary_factor": factor,
+        "assignee": assignee.strip().title(),
+        "starting_date": str(starting_date) if starting_date else None,
+        "deadline": dl_str,
+        "submission_method": submission_method,
+        "product_brand": product_brand,
+        "product_model": product_model,
+        "pdf_path": pdf_path or "",
+        "created_at": firestore.SERVER_TIMESTAMP
+    })
+    return True
 
 
 def update_tender(
-    id: int,
+    id: str,
     project: str,
     client_name: str,
     value: float,
@@ -192,27 +213,32 @@ def update_tender(
     submission_method: str = "",
     product_brand: str = "",
     product_model: str = "",
+    pdf_path: str | None = None,
 ) -> None:
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute(
-        """UPDATE tenders
-           SET project_name=?, client_name=?, value=?, status=?,
-               primary_factor=?, assignee=?, starting_date=?, deadline=?,
-               submission_method=?, product_brand=?, product_model=?
-           WHERE id=?""",
-        (project, client_name, value, status, factor, assignee,
-         str(starting_date) if starting_date else None,
-         str(deadline), submission_method, product_brand, product_model, id),
-    )
-    conn.commit()
-    conn.close()
+    """Update an existing tender document by Firestore ID."""
+    doc_ref = db.collection("tenders").document(id)
+    update_data = {
+        "project_name": project,
+        "client_name": client_name,
+        "value": float(value),
+        "status": status,
+        "primary_factor": factor,
+        "assignee": assignee,
+        "starting_date": str(starting_date) if starting_date else None,
+        "deadline": str(deadline),
+        "submission_method": submission_method,
+        "product_brand": product_brand,
+        "product_model": product_model
+    }
+    if pdf_path is not None:
+        update_data["pdf_path"] = pdf_path
+
+    doc_ref.update(update_data)
 
 
-def delete_tender(id: int) -> None:
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute("DELETE FROM tenders WHERE id=?", (id,))
-    conn.commit()
-    conn.close()
+def delete_tender(id: str) -> None:
+    """Delete a tender document by Firestore ID."""
+    db.collection("tenders").document(id).delete()
 
 
 def recalculate_all_probabilities(predict_fn) -> None:
@@ -224,8 +250,9 @@ def recalculate_all_probabilities(predict_fn) -> None:
     df = load_tenders()
     if df.empty:
         return
-    conn = sqlite3.connect(DB_FILE)
+        
     from config import ATTRIBUTES
+    
     for _, row in df.iterrows():
         best_prob = -1
         best_fac = ATTRIBUTES[0]
@@ -239,9 +266,9 @@ def recalculate_all_probabilities(predict_fn) -> None:
                 best_prob = res.probability
                 best_fac = fac
 
-        conn.execute(
-            "UPDATE tenders SET win_prob=?, primary_factor=? WHERE id=?",
-            (best_prob, best_fac, row["id"]),
-        )
-    conn.commit()
-    conn.close()
+        # Update in Firestore
+        doc_ref = db.collection("tenders").document(row["id"])
+        doc_ref.update({
+            "win_prob": float(best_prob),
+            "primary_factor": best_fac
+        })

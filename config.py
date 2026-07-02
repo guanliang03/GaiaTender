@@ -4,6 +4,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 DB_FILE = "tender_system_final.db"
+FIREBASE_SERVICE_ACCOUNT_KEY = "serviceAccountKey.json"
 
 ATTRIBUTES = [
     "Relationship & Reputation",

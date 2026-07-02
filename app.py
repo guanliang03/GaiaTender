@@ -1,6 +1,6 @@
 # app.py
 # ─────────────────────────────────────────────────────────────────────────────
-# Smart Tender System — entry point.
+# Tender Prediction and Groundwork Tracking System — entry point.
 #
 # Run with:  streamlit run app.py
 #
@@ -34,7 +34,7 @@ import ui_tab_gaia_analysis as tab_gaia
 init_db()
 
 st.set_page_config(
-    page_title="Smart Tender System",
+    page_title="Tender Prediction and Groundwork Tracking System",
     layout="wide",
     page_icon="📋",
 )
@@ -82,7 +82,7 @@ df_master  = load_tenders()
 
 # ── Main tabs ─────────────────────────────────────────────────────────────────
 
-st.title("📋 Smart Tender System")
+st.title("📋 Tender Prediction and Groundwork Tracking System")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📝 New Entry",
