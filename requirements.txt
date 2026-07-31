@@ -1,0 +1,8 @@
+streamlit
+firebase-admin
+pandas
+matplotlib
+reportlab
+pdfplumber
+openpyxl
+numpy
