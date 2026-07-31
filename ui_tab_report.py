@@ -64,6 +64,11 @@ def render(df_master: pd.DataFrame) -> None:
     result = predict(
         row["value"], row["client_name"],
         row["primary_factor"], row["assignee"], df_master,
+        deadline=row.get("deadline"),
+        product_brand=str(row.get("product_brand", "") or ""),
+        product_model=str(row.get("product_model", "") or ""),
+        project_name=str(row.get("project_name", "") or ""),
+        status=row.get("status", ""),
     )
     render_breakdown(result, compact=False)
 

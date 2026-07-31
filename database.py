@@ -16,18 +16,31 @@ from config import FIREBASE_SERVICE_ACCOUNT_KEY
 
 if not firebase_admin._apps:
     try:
-        # Check if the service account key file exists
+        # 1. Check if the service account key file exists locally
         if os.path.exists(FIREBASE_SERVICE_ACCOUNT_KEY):
             cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_KEY)
             firebase_admin.initialize_app(cred)
         else:
-            # Fallback: Attempt to use environment / default credentials (ADC)
-            firebase_admin.initialize_app()
+            # 2. Check if credentials can be loaded from Streamlit secrets
+            firebase_creds = None
+            try:
+                import streamlit as st
+                if "firebase" in st.secrets:
+                    firebase_creds = dict(st.secrets["firebase"])
+            except Exception:
+                pass
+
+            if firebase_creds:
+                cred = credentials.Certificate(firebase_creds)
+                firebase_admin.initialize_app(cred)
+            else:
+                # 3. Fallback: Attempt to use environment / default credentials (ADC)
+                firebase_admin.initialize_app()
     except Exception as e:
         raise RuntimeError(
             f"Failed to initialise Firebase Admin SDK.\n"
             f"Please verify that the service account JSON file is placed at "
-            f"'{FIREBASE_SERVICE_ACCOUNT_KEY}' or credentials are set in the environment.\n"
+            f"'{FIREBASE_SERVICE_ACCOUNT_KEY}', defined in Streamlit secrets, or credentials are set in the environment.\n"
             f"Error details: {e}"
         )
 
@@ -90,6 +103,13 @@ def load_tenders() -> pd.DataFrame:
     for col in required_cols:
         if col not in df.columns:
             df[col] = None
+
+    # Automatically treat "Submitted" tenders as "Untracked" if the deadline has passed
+    if "status" in df.columns and "deadline" in df.columns:
+        from datetime import date
+        today = date.today()
+        mask = (df["status"] == "Submitted") & (df["deadline"].apply(lambda d: isinstance(d, date) and d < today))
+        df.loc[mask, "status"] = "Untracked"
 
     # Reorder columns to align with the expected schema
     return df[required_cols]
@@ -241,7 +261,7 @@ def delete_tender(id: str) -> None:
     db.collection("tenders").document(id).delete()
 
 
-def recalculate_all_probabilities(predict_fn) -> None:
+def recalculate_all_probabilities(predict_fn=None) -> None:
     """
     Re-run the AI engine on every tender and persist the new win_prob.
     Also re-evaluates and updates the best Key Driver (primary_factor).
@@ -250,25 +270,32 @@ def recalculate_all_probabilities(predict_fn) -> None:
     df = load_tenders()
     if df.empty:
         return
-        
-    from config import ATTRIBUTES
-    
-    for _, row in df.iterrows():
-        best_prob = -1
-        best_fac = ATTRIBUTES[0]
 
-        for fac in ATTRIBUTES:
-            res = predict_fn(
-                row["value"], row["client_name"],
-                fac, row["assignee"], df,
-            )
-            if res.probability > best_prob:
-                best_prob = res.probability
-                best_fac = fac
+    from config import ATTRIBUTES
+    from ai_engine import pick_best_attribute, predict
+
+    for _, row in df.iterrows():
+        deadline = row.get("deadline")
+        p_brand  = str(row.get("product_brand", "") or "")
+        p_model  = str(row.get("product_model", "") or "")
+        p_name   = str(row.get("project_name", "") or "")
+
+        best_fac, best_res = pick_best_attribute(
+            project_value=row["value"],
+            client_name=row["client_name"],
+            assignee=row["assignee"],
+            history=df,
+            attributes=ATTRIBUTES,
+            deadline=deadline,
+            product_brand=p_brand,
+            product_model=p_model,
+            project_name=p_name,
+            status=row.get("status", ""),
+        )
 
         # Update in Firestore
         doc_ref = db.collection("tenders").document(row["id"])
         doc_ref.update({
-            "win_prob": float(best_prob),
+            "win_prob": float(best_res.probability),
             "primary_factor": best_fac
         })

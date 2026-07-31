@@ -480,131 +480,18 @@ def _parse_ocr_text(text: str) -> dict:
     return found
 
 
-def _extract_image_fields(img_bytes: bytes) -> dict:
-    """
-    Enhanced image OCR pipeline for PNG/JPG/TIFF/BMP/WEBP uploads.
-
-    Improvements over the basic version
-    ─────────────────────────────────────
-    1. Pre-processing
-       • Upscale images narrower than 1 400 px (OCR needs ~300 DPI equivalent).
-       • Boost contrast (1.6×) and sharpness (2.0×) so faint/blurry text is
-         readable.
-       • Convert to greyscale for the sharpening pass, then back to RGB so
-         EasyOCR still has colour context.
-
-    2. OCR with confidence gating
-       • Runs EasyOCR with detail=1 (returns bounding box + confidence score).
-       • Drops any token with confidence < 0.25 (reduces garbage characters).
-
-    3. Position-aware text reconstruction
-       • Groups tokens into logical rows based on vertical proximity
-         (adaptive threshold = image_height ÷ 60, minimum 12 px).
-       • Within each row, tokens are sorted left→right by their X coordinate.
-       • Rows are emitted top→bottom as separate lines.
-       This means a 3-column table becomes readable left-to-right text instead
-       of a random dump of column headers followed by values.
-
-    4. Raw-text debug expander
-       • Shows the reconstructed text inside a collapsed expander so users can
-         verify what OCR saw if fields are not filled correctly.
-    """
-    try:
-        import io
-        import numpy as np
-        from PIL import Image, ImageEnhance, ImageFilter
-        import easyocr
-    except ImportError:
-        st.warning("⚠️ Missing libraries for image OCR. Install: pillow easyocr numpy")
-        return {}
-
-    try:
-        # ── 1. Load & pre-process ─────────────────────────────────────────────
-        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        w, h = img.size
-
-        # Upscale if too small (OCR accuracy drops significantly below ~150 DPI)
-        if w < 1400:
-            scale = max(2, 1400 // max(w, 1))
-            img = img.resize((w * scale, h * scale), Image.LANCZOS)
-            w, h = img.size
-
-        # Greyscale sharpening pass → back to RGB
-        grey = img.convert("L")
-        grey = ImageEnhance.Contrast(grey).enhance(1.6)
-        grey = grey.filter(ImageFilter.SHARPEN)
-        grey = ImageEnhance.Sharpness(grey).enhance(2.0)
-        img = grey.convert("RGB")
-
-        img_np = np.array(img)
-
-        # ── 2. OCR ────────────────────────────────────────────────────────────
-        with st.spinner("📷 Running OCR on image…"):
-            reader = easyocr.Reader(['en', 'ms'], verbose=False)
-            results = reader.readtext(img_np, detail=1, paragraph=False)
-
-        # Drop low-confidence tokens (garbage, partial characters)
-        results = [(bbox, txt, conf) for bbox, txt, conf in results if conf >= 0.25]
-
-        if not results:
-            st.warning("⚠️ OCR found no readable text in this image.")
-            return {}
-
-        # ── 3. Position-aware text reconstruction ─────────────────────────────
-        # bbox format: [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]
-        # Sort tokens top→bottom by their top-left Y coordinate
-        results.sort(key=lambda r: r[0][0][1])
-
-        # Adaptive row-grouping threshold (tokens within this many px share a row)
-        line_thresh = max(12, h // 60)
-
-        rows: list[list] = []
-        current_row = [results[0]]
-        for r in results[1:]:
-            y_top = r[0][0][1]
-            row_y  = current_row[0][0][0][1]
-            if abs(y_top - row_y) <= line_thresh:
-                current_row.append(r)
-            else:
-                rows.append(current_row)
-                current_row = [r]
-        rows.append(current_row)
-
-        # Within each row sort left→right by X
-        for row in rows:
-            row.sort(key=lambda r: r[0][0][0])
-
-        # Build final text (two spaces between tokens in same row → easier regex)
-        lines = ["  ".join(txt for _, txt, _ in row) for row in rows]
-        text  = "\n".join(lines)
-
-    except Exception as e:
-        st.warning(f"⚠️ Image OCR failed: {e}")
-        return {}
-
-    if not text.strip():
-        st.warning("⚠️ OCR produced no text from this image.")
-        return {}
-
-    # ── 4. Debug expander ────────────────────────────────────────────────────
-    with st.expander("🔍 OCR raw text (click to verify)", expanded=False):
-        st.code(text, language=None)
-
-    return _parse_ocr_text(text)
-
-
 
 def _render_manual(df_master: pd.DataFrame, staff_list: list[str]) -> None:
     if not staff_list:
         st.warning("⚠️ No staff members found. Add at least one staff member in the sidebar before creating a tender.")
         return
 
-    # ── File uploader: PDF or image ─────────────────────────────────────────────
+    # ── File uploader: PDF only ─────────────────────────────────────────────────
     st.markdown("##### 📎 Upload Tender Document *(optional — auto-fills the form)*")
-    st.caption("📄 PDF  ·  🖼️ Image (JPG, PNG, BMP, TIFF, WEBP)  — scanned documents are auto-OCR’d")
+    st.caption("📄 PDF — scanned or digital documents are auto-read")
     s_file = st.file_uploader(
-        "Drop a PDF or image to auto-extract fields",
-        type=["pdf", "jpg", "jpeg", "png", "bmp", "tiff", "tif", "webp"],
+        "Drop a PDF to auto-extract fields",
+        type=["pdf"],
         label_visibility="collapsed",
         key="ne_pdf_uploader",
     )
@@ -613,18 +500,8 @@ def _render_manual(df_master: pd.DataFrame, staff_list: list[str]) -> None:
         file_bytes = s_file.read()
         sig = f"{s_file.name}_{len(file_bytes)}"
         if st.session_state.get("ne_last_pdf_sig") != sig:
-            is_image = s_file.type.startswith("image/") or s_file.name.lower().split(".")[-1] in (
-                "jpg", "jpeg", "png", "bmp", "tiff", "tif", "webp"
-            )
-            if is_image:
-                spinner_msg = "📷 Running OCR on image…"
-            else:
-                spinner_msg = "🔍 Reading PDF and extracting fields…"
-            with st.spinner(spinner_msg):
-                if is_image:
-                    extracted = _extract_image_fields(file_bytes)
-                else:
-                    extracted = _extract_pdf_fields(file_bytes)
+            with st.spinner("🔍 Reading PDF and extracting fields…"):
+                extracted = _extract_pdf_fields(file_bytes)
             if extracted:
                 for key, ss_key in _SS.items():
                     if key in extracted:
@@ -696,14 +573,20 @@ def _render_manual(df_master: pd.DataFrame, staff_list: list[str]) -> None:
             if driver_mode == "✏️ Manual":
                 s_fac = c2.selectbox("Key Driver *", ATTRIBUTES)
                 if s_cl and s_val > 0:
-                    best_res = predict(s_val, s_cl, s_fac, s_stf, df_master, deadline=s_dat)
+                    best_res = predict(
+                        s_val, s_cl, s_fac, s_stf, df_master, deadline=s_dat,
+                        product_brand=s_brand, product_model=s_model, project_name=s_proj,
+                        status=s_stat
+                    )
                     c2.caption(f"AI score for this driver: **{best_res.probability}%** · Confidence: {best_res.confidence_level}")
                 else:
                     c2.caption("Fill in Client & Budget to preview AI score.")
             else:
                 if s_cl and s_val > 0:
                     s_fac, best_res = pick_best_attribute(
-                        s_val, s_cl, s_stf, df_master, ATTRIBUTES, deadline=s_dat
+                        s_val, s_cl, s_stf, df_master, ATTRIBUTES, deadline=s_dat,
+                        product_brand=s_brand, product_model=s_model, project_name=s_proj,
+                        status=s_stat
                     )
                     c2.info(f"🤖 AI selected Key Driver: **{s_fac}** · Confidence: {best_res.confidence_level}")
                 else:
@@ -715,7 +598,11 @@ def _render_manual(df_master: pd.DataFrame, staff_list: list[str]) -> None:
                     st.error("Please fill in all required fields (marked with *).")
                 else:
                     if not best_res:
-                        best_res = predict(s_val, s_cl, s_fac, s_stf, df_master, deadline=s_dat)
+                        best_res = predict(
+                            s_val, s_cl, s_fac, s_stf, df_master, deadline=s_dat,
+                            product_brand=s_brand, product_model=s_model, project_name=s_proj,
+                            status=s_stat
+                        )
 
                     # ── Save uploaded PDF ─────────────────────────────────────
                     saved_pdf_path = ""
@@ -765,7 +652,7 @@ _COLUMN_ALIASES: dict[str, list[str]] = {
     "project_name":   ["project_name",   "Project Name",  "Project",
                        "Bidding_Title",   "Bidding Title"],
     "client_name":    ["client_name",    "Client Name",   "Client",
-                       "Institution",    "Institutions/University"],
+                       "Institution",    "Institutions",  "Institutions/University"],
     "value":          ["value",          "Value",         "Budget", "Est. Value",
                        "Amount_Value",   "Amount Value"],
     "bid_amount":     ["bid_amount",     "Bid Amount",    "My Bid Amount", "Bid",
@@ -932,7 +819,8 @@ def _render_upload(df_master: pd.DataFrame, staff_list: list[str]) -> None:
                         continue
 
                     best_fac, best_res = pick_best_attribute(
-                        val, c_name, assignee, df_master, ATTRIBUTES, deadline=deadline
+                        val, c_name, assignee, df_master, ATTRIBUTES, deadline=deadline,
+                        product_brand=p_brand, product_model=p_model, project_name=p_name
                     )
                     fac = best_fac
                     result = best_res

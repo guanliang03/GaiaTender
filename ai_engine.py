@@ -24,6 +24,7 @@ import pandas as pd
 
 from config import (
     ATTRIBUTES,
+    CLOSED_STATUSES,
     ASSIGNEE_RATE_HIGH,
     ASSIGNEE_RATE_MEDIUM,
     COMPETITION_CROWDED_MIN,
@@ -139,6 +140,8 @@ def _calc_confidence(history: pd.DataFrame) -> str:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+# ── Public API ────────────────────────────────────────────────────────────────
+
 def predict(
     project_value: float,
     client_name: str,
@@ -147,6 +150,10 @@ def predict(
     history: pd.DataFrame,
     deadline: date | None = None,
     tender_id: int | None = None,
+    product_brand: str = "",
+    product_model: str = "",
+    project_name: str = "",
+    status: str = "",
 ) -> PredictionResult:
     """
     Run all six scoring rules and return a PredictionResult.
@@ -160,14 +167,18 @@ def predict(
     history        : Full tenders DataFrame (used as the evidence base).
     deadline       : Submission deadline date (optional, enables Rule 5).
     tender_id      : ID of the current tender to exclude from density count.
+    product_brand  : Product brand (optional, enables domain/brand fit in Rule 1).
+    product_model  : Product model / equipment type (optional, enables domain fit).
+    project_name   : Project title (optional, enables keyword fit).
+    status         : Current pipeline status (optional, bypasses deadline urgency if closed).
     """
     rules: list[RuleResult] = []
 
-    rules.append(_rule_strategy(primary_factor, client_name, history))
+    rules.append(_rule_strategy(primary_factor, client_name, history, product_brand, product_model, project_name))
     rules.append(_rule_assignee(assignee, history))
     rules.append(_rule_relationship(client_name, history))
     rules.append(_rule_value_fit(project_value, history))
-    rules.append(_rule_deadline_urgency(deadline))
+    rules.append(_rule_deadline_urgency(deadline, status))
     rules.append(_rule_competition_density(client_name, history, tender_id))
 
     raw = sum(r.score for r in rules)
@@ -195,25 +206,30 @@ def pick_best_attribute(
     attributes: list[str],
     deadline: date | None = None,
     tender_id: int | None = None,
+    product_brand: str = "",
+    product_model: str = "",
+    project_name: str = "",
+    status: str = "",
 ) -> tuple[str, PredictionResult]:
     """
-    Select the best competitive attribute for a new tender, free of bias.
+    Select the best competitive attribute for a new tender using multi-level context analysis.
 
     Algorithm
     ---------
-    1. Score all attributes via predict() (including deadline & competition rules).
-    2. Identify all attributes that share the maximum probability (tied group).
-    3. Among tied attributes, choose the one **least represented** in existing
-       tenders' primary_factor column — this ensures diverse training data and
-       prevents a single attribute from snowballing just because it was
-       arbitrarily chosen first.
-    4. If still tied after usage check, pick at random.
+    1. Score all attributes via predict() with full product & client context.
+    2. Identify all attributes sharing the maximum probability (tied group).
+    3. If tied, prioritize attributes matching product domain keywords / historical product wins.
+    4. If still tied, choose the least represented attribute in history to prevent snowballing.
     """
     import random
 
     scored: dict[str, PredictionResult] = {
-        attr: predict(project_value, client_name, attr, assignee, history,
-                      deadline=deadline, tender_id=tender_id)
+        attr: predict(
+            project_value, client_name, attr, assignee, history,
+            deadline=deadline, tender_id=tender_id,
+            product_brand=product_brand, product_model=product_model, project_name=project_name,
+            status=status
+        )
         for attr in attributes
     }
 
@@ -223,16 +239,52 @@ def pick_best_attribute(
     if len(tied) == 1:
         chosen = tied[0]
     else:
-        if not history.empty and "primary_factor" in history.columns:
-            usage = history["primary_factor"].value_counts()
-            min_count = min(usage.get(attr, 0) for attr in tied)
-            least_used = [attr for attr in tied if usage.get(attr, 0) == min_count]
-        else:
-            least_used = tied
+        # Check domain keyword fit score among tied attributes
+        domain_fits = {
+            attr: _calc_domain_fit(attr, product_brand, product_model, project_name)
+            for attr in tied
+        }
+        max_fit = max(domain_fits.values())
+        best_fits = [attr for attr, fit in domain_fits.items() if fit == max_fit and fit > 0]
 
-        chosen = random.choice(least_used)
+        if len(best_fits) == 1:
+            chosen = best_fits[0]
+        else:
+            candidates = best_fits if best_fits else tied
+            if not history.empty and "primary_factor" in history.columns:
+                usage = history["primary_factor"].value_counts()
+                min_count = min(usage.get(attr, 0) for attr in candidates)
+                least_used = [attr for attr in candidates if usage.get(attr, 0) == min_count]
+            else:
+                least_used = candidates
+
+            chosen = random.choice(least_used)
 
     return chosen, scored[chosen]
+
+
+# ── Domain Keyword Fit Helper ──────────────────────────────────────────────────
+
+_DOMAIN_KEYWORDS = {
+    "Price": ["reagent", "consumable", "chemical", "kit", "supply", "low cost", "cheap", "standard", "budget"],
+    "Technical Capability": [
+        "hplc", "spectro", "microscop", "sequenc", "chromatograph", "centrifug", "pcr",
+        "analyser", "analyzer", "flow cytom", "nmr", "mass spec", "solar simulator",
+        "freeze dryer", "test chamber", "incubator", "biosafety", "cabinet", "rotary evapor",
+        "gc-ms", "mastercycler"
+    ],
+    "Delivery & Timeline": ["deliver", "courier", "install", "commission", "urgent", "express", "fast", "timeline"],
+    "Relationship & Reputation": ["service", "maintenance", "warranty", "support", "consultation", "partnership", "renewal"],
+}
+
+def _calc_domain_fit(factor: str, product_brand: str, product_model: str, project_name: str) -> float:
+    text = f"{product_brand} {product_model} {project_name}".lower()
+    keywords = _DOMAIN_KEYWORDS.get(factor, [])
+    score = 0.0
+    for kw in keywords:
+        if kw in text:
+            score += 1.0
+    return score
 
 
 # ── Rule 1 — Strategy alignment ───────────────────────────────────────────────
@@ -241,25 +293,49 @@ def _rule_strategy(
     primary_factor: str,
     client_name: str,
     history: pd.DataFrame,
+    product_brand: str = "",
+    product_model: str = "",
+    project_name: str = "",
 ) -> RuleResult:
 
     W = WEIGHT_STRATEGY
-    won = history[history["status"] == "Won"]
+    won = history[history["status"] == "Won"] if not history.empty and "status" in history.columns else pd.DataFrame()
 
     client_wins = (
         won[won["client_name"].str.lower() == client_name.lower()]
-        if client_name else pd.DataFrame()
+        if (not won.empty and client_name and "client_name" in won.columns) else pd.DataFrame()
     )
 
-    # ── Path A: we have client-specific win data ──────────────────────────────
-    if not client_wins.empty:
+    # 1. Product/Domain Fit Score (max 10 pts out of 25)
+    domain_fit_val = _calc_domain_fit(primary_factor, product_brand, product_model, project_name)
+    domain_pts = min(10, int(domain_fit_val * 5))
+
+    # Check historical wins with same product model/brand
+    product_win_pts = 0
+    if not won.empty and (product_model or product_brand):
+        match_mask = pd.Series(False, index=won.index)
+        if product_model and "product_model" in won.columns:
+            match_mask |= (won["product_model"].astype(str).str.lower() == product_model.lower())
+        if product_brand and "product_brand" in won.columns:
+            match_mask |= (won["product_brand"].astype(str).str.lower() == product_brand.lower())
+        prod_wins = won[match_mask]
+        if not prod_wins.empty and "primary_factor" in prod_wins.columns:
+            factor_prod_wins = len(prod_wins[prod_wins["primary_factor"] == primary_factor])
+            if factor_prod_wins > 0:
+                product_win_pts = min(6, factor_prod_wins * 3)
+
+    extra_pts = max(domain_pts, product_win_pts)
+
+    # ── Path A: Client-specific history exists ──────────────────────────────
+    if not client_wins.empty and "primary_factor" in client_wins.columns:
         factor_counts = client_wins["primary_factor"].value_counts()
         preferred = factor_counts.index[0]
         preferred_count = factor_counts.iloc[0]
+        client_total_wins = len(client_wins)
         data_source = (
-            f"{len(client_wins)} win(s) with this client; "
+            f"{client_total_wins} win(s) with this client; "
             f"'{preferred}' won {preferred_count}× "
-            f"({preferred_count/len(client_wins)*100:.0f}%)"
+            f"({preferred_count/client_total_wins*100:.0f}%)"
         )
 
         if primary_factor == preferred:
@@ -267,13 +343,13 @@ def _rule_strategy(
             verdict = "✅ Matches Client Preference"
             rationale = (
                 f"This client has historically favoured '{preferred}' as the winning "
-                f"factor in {preferred_count} of {len(client_wins)} won deals. "
+                f"factor in {preferred_count} of {client_total_wins} won deals. "
                 "Your strategy is perfectly aligned."
             )
         else:
             our_wins = len(client_wins[client_wins["primary_factor"] == primary_factor])
             if our_wins > 0:
-                score = int(W * 0.55)
+                score = min(W, int(W * 0.55) + extra_pts)
                 verdict = "🟡 Partial Alignment"
                 rationale = (
                     f"'{primary_factor}' has won {our_wins}× with this client, "
@@ -281,43 +357,53 @@ def _rule_strategy(
                     "Consider leading with the client's preferred driver."
                 )
             else:
-                score = int(W * 0.25)
-                verdict = "⚠️ Strategy Misaligned"
+                score = min(W, int(W * 0.25) + extra_pts)
+                verdict = "🟡 Domain Fit / Misaligned Client" if extra_pts > 0 else "⚠️ Strategy Misaligned"
                 rationale = (
+                    f"'{primary_factor}' has no prior wins with this client (favours '{preferred}'), "
+                    f"but aligns with product domain characteristics." if extra_pts > 0 else
                     f"'{primary_factor}' has never won a deal with this client. "
-                    f"Their historical preference is '{preferred}'. "
-                    "Strongly consider realigning your strategy."
+                    f"Their historical preference is '{preferred}'. Strongly consider realigning."
                 )
         return RuleResult("Strategy", score, W, verdict, rationale, data_source)
 
-    # ── Path B: no client history — use market-wide data ─────────────────────
-    if not won.empty:
+    # ── Path B: No client history — market history + domain fit ─────────────
+    if not won.empty and "primary_factor" in won.columns:
         market_counts = won["primary_factor"].value_counts()
         attr_wins = market_counts.get(primary_factor, 0)
         total_wins = len(won)
-        data_source = f"No client history — using {total_wins} market win(s)"
+        data_source = f"No client history — using {total_wins} market win(s) & product domain fit"
 
-        if attr_wins > 0:
-            rate = attr_wins / total_wins
-            score = int(W * (0.40 + 0.40 * rate))
+        base_rate = attr_wins / total_wins if total_wins > 0 else 0
+        base_score = int(W * (0.40 + 0.40 * base_rate))
+        score = min(W, base_score + extra_pts)
+
+        if extra_pts > 0:
+            verdict = "✅ Product Domain Fit & Market Validated"
+            rationale = (
+                f"'{primary_factor}' strongly aligns with product domain specs ({product_model or project_name}) "
+                f"and has won {attr_wins} of {total_wins} market deals ({base_rate*100:.0f}%)."
+            )
+        elif attr_wins > 0:
             verdict = "✅ Proven Market Strategy"
             rationale = (
                 f"'{primary_factor}' has won {attr_wins} of {total_wins} market deals "
-                f"({rate * 100:.0f}%). No specific client data exists, but this is "
-                "a validated approach."
+                f"({base_rate * 100:.0f}%). No specific client data exists, but this is a validated approach."
             )
         else:
-            score = int(W * 0.35)
             verdict = "ℹ️ Untested Strategy"
             rationale = (
                 f"'{primary_factor}' has not won any recorded market deals yet. "
-                "This does not mean it cannot work, but there is no evidence base."
+                "There is no historical evidence base for this factor."
             )
     else:
-        score = int(W * 0.40)
-        verdict = "ℹ️ No History Available"
-        rationale = "No won deals exist in the system to benchmark strategy against."
-        data_source = "No data"
+        score = min(W, int(W * 0.40) + extra_pts)
+        verdict = "✅ Product Domain Fit" if extra_pts > 0 else "ℹ️ No History Available"
+        rationale = (
+            f"Strategy selected based on product domain alignment ({product_model or project_name})."
+            if extra_pts > 0 else "No won deals exist in the system to benchmark strategy against."
+        )
+        data_source = "Product domain rules" if extra_pts > 0 else "No data"
 
     return RuleResult("Strategy", score, W, verdict, rationale, data_source)
 
@@ -533,10 +619,10 @@ def _rule_value_fit(project_value: float, history: pd.DataFrame) -> RuleResult:
 
 # ── Rule 5 — Deadline urgency ─────────────────────────────────────────────────
 
-def _rule_deadline_urgency(deadline: date | None) -> RuleResult:
+def _rule_deadline_urgency(deadline: date | str | None, status: str = "") -> RuleResult:
     W = WEIGHT_DEADLINE_URGENCY
 
-    if deadline is None:
+    if deadline is None or str(deadline).lower() in ("nan", "none", ""):
         score = int(W * 0.50)
         return RuleResult(
             "Deadline", score, W,
@@ -545,17 +631,43 @@ def _rule_deadline_urgency(deadline: date | None) -> RuleResult:
             "No deadline data",
         )
 
+    if isinstance(deadline, str):
+        try:
+            deadline = pd.to_datetime(deadline).date()
+        except Exception:
+            deadline = None
+    elif hasattr(deadline, "date") and callable(getattr(deadline, "date")):
+        deadline = deadline.date()
+
+    if deadline is None:
+        score = int(W * 0.50)
+        return RuleResult(
+            "Deadline", score, W,
+            "ℹ️ Invalid Deadline Format",
+            "Deadline date format could not be parsed. A neutral score is applied.",
+            "Unparseable deadline",
+        )
+
     today = date.today()
     days_left = (deadline - today).days
 
     if days_left < 0:
-        score = 0
-        verdict = "🔴 Deadline Passed"
-        rationale = (
-            f"The deadline was {abs(days_left)} day(s) ago ({deadline}). "
-            "This tender can no longer be submitted."
-        )
-        data_source = f"Deadline: {deadline} · Days remaining: {days_left}"
+        if status in CLOSED_STATUSES or status == "Untracked":
+            score = W
+            verdict = "🔒 Closed / Untracked Tender"
+            rationale = (
+                f"This tender is closed or untracked ({status}). "
+                "Deadline urgency penalty is bypassed."
+            )
+            data_source = f"Deadline: {deadline} · Status: {status}"
+        else:
+            score = 0
+            verdict = "🔴 Deadline Passed"
+            rationale = (
+                f"The deadline was {abs(days_left)} day(s) ago ({deadline}). "
+                "This tender can no longer be submitted."
+            )
+            data_source = f"Deadline: {deadline} · Days remaining: {days_left}"
     elif days_left >= DEADLINE_COMFORTABLE_DAYS:
         score = W
         verdict = "✅ Comfortable Timeline"

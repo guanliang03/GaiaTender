@@ -86,7 +86,11 @@ def _render_controls(edited: pd.DataFrame, original: pd.DataFrame) -> None:
 
 
 def _render_workload(df: pd.DataFrame) -> None:
-    active = df[~df["status"].isin(["Won", "Lost", "Untracked"])]
+    active = df[~df["status"].isin(["Won", "Lost", "Untracked"])].copy()
+    if not active.empty and "deadline" in active.columns:
+        from datetime import date
+        today = date.today()
+        active = active[active["deadline"].apply(lambda d: isinstance(d, date) and d >= today)]
 
     col_l, col_r = st.columns(2)
 

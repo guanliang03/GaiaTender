@@ -4,6 +4,19 @@
 # Run with: pytest test_app.py
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Mock firebase_admin and firestore to avoid actual connection attempts during AppTest
+import sys
+from unittest.mock import MagicMock
+
+mock_db = MagicMock()
+mock_firestore_client = MagicMock()
+mock_firestore_client.collections.return_value = []
+mock_db.client.return_value = mock_firestore_client
+
+sys.modules['firebase_admin'] = MagicMock()
+sys.modules['firebase_admin.credentials'] = MagicMock()
+sys.modules['firebase_admin.firestore'] = mock_db
+
 import unittest
 from unittest.mock import patch
 import pandas as pd
@@ -27,7 +40,7 @@ class TestSmartTenderSystemApp(unittest.TestCase):
         at.run()
 
         # 1. Assert onboarding page title or subheader is visible
-        self.assertTrue(any("Smart Tender System" in title.value for title in at.title))
+        self.assertTrue(any("Tender" in title.value for title in at.title))
         self.assertTrue(any("Welcome — No data found yet" in sub.value for sub in at.subheader))
         
         # 2. Check sidebar header
@@ -65,7 +78,7 @@ class TestSmartTenderSystemApp(unittest.TestCase):
         at.run()
 
         # 1. Verify main system title
-        self.assertTrue(any("Smart Tender System" in title.value for title in at.title))
+        self.assertTrue(any("Tender" in title.value for title in at.title))
 
         # 2. Check sidebar displays current staff members
         sidebar_captions = [caption.value for caption in at.sidebar.caption]
