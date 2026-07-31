@@ -26,7 +26,22 @@ if not firebase_admin._apps:
             try:
                 import streamlit as st
                 if "firebase" in st.secrets:
-                    firebase_creds = dict(st.secrets["firebase"])
+                    sec = st.secrets["firebase"]
+                    if isinstance(sec, str):
+                        import json
+                        firebase_creds = json.loads(sec)
+                    elif hasattr(sec, "to_dict"):  # Streamlit Secrets object can be converted to dict
+                        firebase_creds = sec.to_dict()
+                    elif isinstance(sec, dict):
+                        firebase_creds = sec
+                    else:
+                        # Fallback try dict conversion
+                        firebase_creds = dict(sec)
+                    
+                    # If it's a dictionary with a single key 'credentials' containing the JSON string
+                    if firebase_creds and "credentials" in firebase_creds and len(firebase_creds) == 1:
+                        import json
+                        firebase_creds = json.loads(firebase_creds["credentials"])
             except Exception:
                 pass
 
@@ -44,7 +59,23 @@ if not firebase_admin._apps:
             f"Error details: {e}"
         )
 
-db = firestore.client()
+try:
+    db = firestore.client()
+except Exception as e:
+    raise RuntimeError(
+        "Could not initialize Firebase Firestore client. "
+        "This usually means the Firebase credentials were not found or are invalid.\n\n"
+        "If you are running on Streamlit Cloud, please make sure you have added your service account credentials "
+        "to the 'Secrets' manager in your Streamlit Cloud Dashboard (Settings > Secrets) in the following format:\n\n"
+        "[firebase]\n"
+        "type = \"service_account\"\n"
+        "project_id = \"your-project-id\"\n"
+        "private_key_id = \"your-private-key-id\"\n"
+        "private_key = \"-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n\"\n"
+        "client_email = \"your-client-email\"\n"
+        "...\n\n"
+        f"Original error details: {e}"
+    )
 
 
 # ── Schema / Connection Initialisation ────────────────────────────────────────
