@@ -80,13 +80,23 @@ if not firebase_admin._apps:
                 firebase_admin.initialize_app()
     except Exception as e:
         keys_info = ""
+        debug_info = ""
         try:
             if 'firebase_creds' in locals() and firebase_creds:
                 keys_info = f" Parsed keys: {list(firebase_creds.keys())}."
-        except Exception:
-            pass
+                pk_raw = firebase_creds.get("private_key", "")
+                if isinstance(pk_raw, str):
+                    # Mask letters and digits to preserve security
+                    masked_raw = "".join(c if not c.isalnum() else "X" for c in pk_raw)
+                    debug_info = (
+                        f"\n[Debug] Raw private key length: {len(pk_raw)}. "
+                        f"Ends with (masked): {repr(masked_raw[-100:])}."
+                    )
+        except Exception as debug_err:
+            debug_info = f"\n[Debug] Failed to gather debug info: {debug_err}"
+            
         raise RuntimeError(
-            f"Failed to initialise Firebase Admin SDK.{keys_info}\n"
+            f"Failed to initialise Firebase Admin SDK.{keys_info}{debug_info}\n"
             f"Please verify that the service account JSON file is placed at "
             f"'{FIREBASE_SERVICE_ACCOUNT_KEY}', defined in Streamlit secrets, or credentials are set in the environment.\n"
             f"Error details: {e}"
