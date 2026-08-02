@@ -11,6 +11,27 @@ from firebase_admin import credentials, firestore
 import pandas as pd
 
 from config import FIREBASE_SERVICE_ACCOUNT_KEY
+def clean_private_key(pk: str) -> str:
+    # Resolve any literal "\n" / "\r" text into real characters
+    pk = pk.replace("\\n", "\n").replace("\\r", "\r")
+    
+    header = "-----BEGIN PRIVATE KEY-----"
+    footer = "-----END PRIVATE KEY-----"
+    
+    pk_clean = pk.strip()
+    if pk_clean.startswith(header):
+        pk_clean = pk_clean[len(header):]
+    if pk_clean.endswith(footer):
+        pk_clean = pk_clean[:-len(footer)]
+    
+    # Strip any characters that are not valid base64 components (whitespaces, newlines, etc.)
+    import re
+    payload = re.sub(r'[^A-Za-z0-9+/=]', '', pk_clean)
+    
+    # Reconstruct standard 64-character per line PEM format
+    lines = [payload[i:i+64] for i in range(0, len(payload), 64)]
+    return f"{header}\n" + "\n".join(lines) + f"\n{footer}\n"
+
 
 # ── Safe Firebase Admin SDK Initialisation ────────────────────────────────────
 
@@ -49,8 +70,8 @@ if not firebase_admin._apps:
                 if isinstance(firebase_creds, dict) and "private_key" in firebase_creds:
                     pk = firebase_creds["private_key"]
                     if isinstance(pk, str):
-                        # Fix double-escaped newlines if they were pasted literally
-                        firebase_creds["private_key"] = pk.replace("\\n", "\n")
+                        # Clean and format the private key to be 100% correct
+                        firebase_creds["private_key"] = clean_private_key(pk)
                 
                 cred = credentials.Certificate(firebase_creds)
                 firebase_admin.initialize_app(cred)
