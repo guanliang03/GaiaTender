@@ -5,3 +5,4 @@ __pycache__/
 *.sqlite
 .env
 serviceAccountKey.json
+streamlit_secrets_template.toml
