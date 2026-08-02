@@ -25,10 +25,11 @@ from streamlit.testing.v1 import AppTest
 
 class TestSmartTenderSystemApp(unittest.TestCase):
 
+    @patch("database.init_db")
     @patch("database.db_is_empty")
     @patch("database.get_all_staff")
     @patch("database.load_tenders")
-    def test_onboarding_screen_when_empty(self, mock_load, mock_get_staff, mock_is_empty):
+    def test_onboarding_screen_when_empty(self, mock_load, mock_get_staff, mock_is_empty, mock_init_db):
         """Verify that the onboarding page is shown when the database is completely empty."""
         # Mock database layer returning empty state
         mock_is_empty.return_value = True
@@ -46,10 +47,11 @@ class TestSmartTenderSystemApp(unittest.TestCase):
         # 2. Check sidebar header
         self.assertTrue(any("Sales Support Team" in sidebar_title.value for sidebar_title in at.sidebar.title))
 
+    @patch("database.init_db")
     @patch("database.db_is_empty")
     @patch("database.get_all_staff")
     @patch("database.load_tenders")
-    def test_main_dashboard_when_populated(self, mock_load, mock_get_staff, mock_is_empty):
+    def test_main_dashboard_when_populated(self, mock_load, mock_get_staff, mock_is_empty, mock_init_db):
         """Verify that the main tabs and sidebar are displayed when the database has data."""
         # Mock database layer returning populated state
         mock_is_empty.return_value = False

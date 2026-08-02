@@ -46,14 +46,26 @@ if not firebase_admin._apps:
                 pass
 
             if firebase_creds:
+                if isinstance(firebase_creds, dict) and "private_key" in firebase_creds:
+                    pk = firebase_creds["private_key"]
+                    if isinstance(pk, str):
+                        # Fix double-escaped newlines if they were pasted literally
+                        firebase_creds["private_key"] = pk.replace("\\n", "\n")
+                
                 cred = credentials.Certificate(firebase_creds)
                 firebase_admin.initialize_app(cred)
             else:
                 # 3. Fallback: Attempt to use environment / default credentials (ADC)
                 firebase_admin.initialize_app()
     except Exception as e:
+        keys_info = ""
+        try:
+            if 'firebase_creds' in locals() and firebase_creds:
+                keys_info = f" Parsed keys: {list(firebase_creds.keys())}."
+        except Exception:
+            pass
         raise RuntimeError(
-            f"Failed to initialise Firebase Admin SDK.\n"
+            f"Failed to initialise Firebase Admin SDK.{keys_info}\n"
             f"Please verify that the service account JSON file is placed at "
             f"'{FIREBASE_SERVICE_ACCOUNT_KEY}', defined in Streamlit secrets, or credentials are set in the environment.\n"
             f"Error details: {e}"
