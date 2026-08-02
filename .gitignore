@@ -6,3 +6,6 @@ __pycache__/
 .env
 serviceAccountKey.json
 streamlit_secrets_template.toml
+*.csv
+2024 - Tender Sebutharga Summary(2024).csv
+2025 - Tender Sebutharga Summary(2025).csv
