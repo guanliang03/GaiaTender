@@ -6,3 +6,4 @@ reportlab
 pdfplumber
 openpyxl
 numpy
+plotly
