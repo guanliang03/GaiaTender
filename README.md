@@ -1,86 +1,84 @@
-# Smart Tender System — v2
+# Smart Tender Prediction and Groundwork Tracking System
 
-## Quick Start
-```bash
-pip install streamlit pandas altair matplotlib reportlab openpyxl "numpy<2" "scipy<1.12" pypdfium2 easyocr
-streamlit run app.py
-```
+An AI-powered dashboard built with Streamlit and Firebase Firestore to track sales tenders, analyze workload distribution, and predict win probabilities using a rule-based weighted scoring engine.
 
-The database starts **completely empty** — no dummy data.  
-On first launch you will see the onboarding screen with a CSV template to download and fill in.
+---
+
+## Quick Start (Local Development)
+
+1. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. **Setup credentials:**
+   - Place your Firebase service account key JSON file in the root directory and name it `serviceAccountKey.json`.
+3. **Launch the application:**
+   ```bash
+   streamlit run app.py
+   ```
+
+On the first launch, if your database has no records, you will see the onboarding screen where you can add your first staff member or download a CSV template to seed your data.
 
 ---
 
 ## File Structure
 
 ```
-tender_system/
-├── app.py                    # Entry point — sidebar, onboarding gate, tabs
-├── config.py                 # ALL constants: weights, thresholds, stage lists
-├── database.py               # SQLite init + CRUD (no seed data)
-├── ai_engine.py              # 5-rule scoring engine + analytics helpers
-├── charts.py                 # Matplotlib charts + ReportLab PDF export
-├── ui_onboarding.py          # Empty-state screen with CSV template download
-├── ui_score_breakdown.py     # Reusable score breakdown widget
-├── ui_tab_new_entry.py       # Tab 1: manual form + bulk upload
-├── ui_tab_pipeline.py        # Tab 2: editable grid + workload charts
-├── ui_tab_report.py          # Tab 3: full breakdown card + PDF download
-└── ui_tab_performance.py     # Tab 4: analytics + relationship depth table
+GaiaTender/
+├── app.py                      # Main entry point (sidebar, onboarding gate, and tabs)
+├── config.py                   # Central configuration (weights, thresholds, stages)
+├── database.py                 # Firebase Firestore schema and CRUD operations
+├── ai_engine.py                # 6-rule AI scoring engine + prediction logic
+├── charts.py                   # Matplotlib chart builders + ReportLab PDF exporter
+├── ui_onboarding.py            # Empty-state screen with CSV template generator
+├── ui_score_breakdown.py       # Reusable UI component for live score visualization
+├── ui_tab_new_entry.py         # Tab 1: Manual form + CSV/Excel bulk upload
+├── ui_tab_pipeline.py          # Tab 2: Interactive editable data grid & workload charts
+├── ui_tab_report.py            # Tab 3: Detailed AI score breakdowns & PDF report exporter
+├── ui_tab_performance.py       # Tab 4: Win/Loss performance analytics & relationships table
+└── ui_tab_gaia_analysis.py     # Tab 5: Plotly-powered advanced data analytics
 ```
 
 ---
 
-## AI Scoring Rules (5 Components, 100 pts max)
+## AI Scoring System (6 Components, 100 pts max)
 
-| # | Rule | Max | Logic |
-|---|------|-----|-------|
-| 1 | **Price** | 30 | Bid ratio vs historical winning ratio for this client (or market avg). Over-budget = 3 pts. |
-| 2 | **Strategy** | 25 | Does the chosen attribute match what has won with this client? Falls back to market-wide data. |
-| 3 | **Assignee** | 20 | Lead's personal win/loss ratio across all closed deals. New leads = neutral 50%. |
-| 4 | **Relationship Depth** | 15 | Combines: how many closed deals with this client × quality of those deals (win rate). |
-| 5 | **Value Fit** | 10 | Is the project value within ±40% of the median won deal size? Far outside = lower score. |
+The prediction engine evaluates 6 independent dimensions to calculate a win probability:
 
-### Rule 4 — Relationship Depth in detail
-
-| Depth tier | Closed deals | Multiplier |
-|---|---|---|
-| Strong | ≥ 3 | 1.00 |
-| Developing | 1–2 | 0.65 |
-| Thin / New | 0 | 0.20 |
-
-Quality multiplier (applied on top of depth):
-
-| Win rate with client | Multiplier |
-|---|---|
-| ≥ 50% | 1.00 |
-| > 0% | 0.65 |
-| 0% (never won) | 0.25 |
+| # | Rule | Max Points | Logic / Measures |
+|---|---|---|---|
+| 1 | **Strategy** | 25 | Matches the chosen bidding attribute (Price, Technical Capability, etc.) vs. historical client buying behavior. |
+| 2 | **Assignee** | 22 | Lead's historical performance (win-rate) across all completed deals. |
+| 3 | **Relationship Depth** | 20 | Combines quality (win rate) and quantity (value-weighted contract volume) of prior client dealings. |
+| 4 | **Value Fit** | 13 | Evaluates if the project budget fits within ±40% of the median value of historically Won deals. |
+| 5 | **Deadline Urgency** | 10 | Evaluates days remaining before submission. Tighter deadlines reduce the score. |
+| 6 | **Competition Density** | 10 | Penalizes bid scores if there are multiple active bidding tracks running concurrently for the same client. |
 
 ---
 
-## Score Breakdown UI
+## Streamlit Cloud Deployment
 
-Every tender shows a **full per-rule breakdown**:
-- In **New Entry** → compact 5-tile strip updates live as you type.
-- In **Report tab** → full expandable cards per rule showing:
-  - Points scored / max
-  - Verdict emoji + label
-  - Plain-English rationale ("why this score was given")
-  - Data source ("3 client wins used as benchmark")
-  - Mini progress bar per rule
+To host this application permanently on Streamlit Community Cloud:
 
-Weak-scoring rules (< 60%) auto-expand to draw attention.
+1. Push your code to your GitHub repository (excluding `serviceAccountKey.json` which is ignored in `.gitignore`).
+2. Go to [Streamlit Share](https://share.streamlit.io/) and deploy your repository using `app.py` as the main file path.
+3. In your App settings, go to the **Secrets** tab and paste your Firebase service account JSON under a `[firebase]` header in TOML format:
+   ```toml
+   [firebase]
+   type = "service_account"
+   project_id = "your-project-id"
+   private_key_id = "your-private-key-id"
+   private_key = """-----BEGIN PRIVATE KEY-----
+   ...your private key goes here...
+   -----END PRIVATE KEY-----
+   """
+   client_email = "your-client-email"
+   # (Copy-paste the remaining key-value fields from serviceAccountKey.json)
+   ```
+4. Click **Save** and the app will automatically reboot and connect to Firestore securely.
 
 ---
 
-## Changing Weights
+## Customizing Rules & Weights
 
-All weights and thresholds are in `config.py`. Example — to make relationship
-depth worth more at the cost of price:
-
-```python
-WEIGHT_PRICE        = 25   # was 30
-WEIGHT_RELATIONSHIP = 20   # was 15
-```
-
-No other file needs to change.
+All scoring weights and threshold constants are centralized in `config.py`. Changing a weight there (e.g., modifying `WEIGHT_STRATEGY`) instantly updates the prediction scoring calculations across all tabs, UI score bars, and exported PDF reports. No database schema migrations or changes in other files are needed.
