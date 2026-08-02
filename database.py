@@ -142,9 +142,9 @@ def init_db() -> None:
     Ensure the Firestore client connection is active.
     Collections are created implicitly on write, so no DDL migration is required.
     """
-    # The client is already initialised. We perform a quick ping/check.
+    # The client is already initialised. We perform a quick ping/check with a fast 5s timeout.
     try:
-        db.collections()
+        db.collection("tenders").limit(1).get(timeout=5.0)
     except Exception as e:
         raise ConnectionError(f"Could not connect to Firebase Firestore: {e}")
 
@@ -156,51 +156,54 @@ def load_tenders() -> pd.DataFrame:
     Load all tenders from the Firestore 'tenders' collection.
     Returns a pandas DataFrame sorted by the 'created_at' field descending.
     """
-    tenders_ref = db.collection("tenders")
-    docs = tenders_ref.stream()
+    try:
+        tenders_ref = db.collection("tenders")
+        docs = tenders_ref.stream(timeout=5.0)
 
-    rows = []
-    for doc in docs:
-        data = doc.to_dict()
-        data["id"] = doc.id
-        rows.append(data)
+        rows = []
+        for doc in docs:
+            data = doc.to_dict()
+            data["id"] = doc.id
+            rows.append(data)
 
-    df = pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
 
-    required_cols = [
-        "id", "project_name", "client_name", "value", "win_prob", "status",
-        "primary_factor", "assignee", "starting_date", "deadline",
-        "submission_method", "product_brand", "product_model", "pdf_path"
-    ]
+        required_cols = [
+            "id", "project_name", "client_name", "value", "win_prob", "status",
+            "primary_factor", "assignee", "starting_date", "deadline",
+            "submission_method", "product_brand", "product_model", "pdf_path"
+        ]
 
-    if df.empty:
-        # Return empty DataFrame with correct column structure
-        return pd.DataFrame(columns=required_cols)
+        if df.empty:
+            # Return empty DataFrame with correct column structure
+            return pd.DataFrame(columns=required_cols)
 
-    # Sort in memory by created_at descending if available (SQLite had "ORDER BY id DESC")
-    if "created_at" in df.columns:
-        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
-        df = df.sort_values(by="created_at", ascending=False)
+        # Sort in memory by created_at descending if available (SQLite had "ORDER BY id DESC")
+        if "created_at" in df.columns:
+            df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+            df = df.sort_values(by="created_at", ascending=False)
 
-    # Convert deadline and starting_date fields back to datetime.date objects for the app
-    for col in ("deadline", "starting_date"):
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+        # Convert deadline and starting_date fields back to datetime.date objects for the app
+        for col in ("deadline", "starting_date"):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
 
-    # Ensure all required columns are present (fill missing ones with None/NaN)
-    for col in required_cols:
-        if col not in df.columns:
-            df[col] = None
+        # Ensure all required columns are present (fill missing ones with None/NaN)
+        for col in required_cols:
+            if col not in df.columns:
+                df[col] = None
 
-    # Automatically treat "Submitted" tenders as "Untracked" if the deadline has passed
-    if "status" in df.columns and "deadline" in df.columns:
-        from datetime import date
-        today = date.today()
-        mask = (df["status"] == "Submitted") & (df["deadline"].apply(lambda d: isinstance(d, date) and d < today))
-        df.loc[mask, "status"] = "Untracked"
+        # Automatically treat "Submitted" tenders as "Untracked" if the deadline has passed
+        if "status" in df.columns and "deadline" in df.columns:
+            from datetime import date
+            today = date.today()
+            mask = (df["status"] == "Submitted") & (df["deadline"].apply(lambda d: isinstance(d, date) and d < today))
+            df.loc[mask, "status"] = "Untracked"
 
-    # Reorder columns to align with the expected schema
-    return df[required_cols]
+        # Reorder columns to align with the expected schema
+        return df[required_cols]
+    except Exception as e:
+        raise ConnectionError(f"Failed to load tenders: {e}")
 
 
 def get_all_staff() -> list[str]:
@@ -208,21 +211,27 @@ def get_all_staff() -> list[str]:
     Load all staff names from the Firestore 'staff' collection.
     Returns a list of names sorted alphabetically.
     """
-    staff_ref = db.collection("staff")
-    docs = staff_ref.stream()
-    names = []
-    for doc in docs:
-        data = doc.to_dict()
-        if "name" in data:
-            names.append(data["name"])
-    return sorted(names)
+    try:
+        staff_ref = db.collection("staff")
+        docs = staff_ref.stream(timeout=5.0)
+        names = []
+        for doc in docs:
+            data = doc.to_dict()
+            if "name" in data:
+                names.append(data["name"])
+        return sorted(names)
+    except Exception as e:
+        raise ConnectionError(f"Failed to load staff: {e}")
 
 
 def db_is_empty() -> bool:
     """True when both tenders and staff collections have zero documents."""
-    tenders_empty = len(db.collection("tenders").limit(1).get()) == 0
-    staff_empty = len(db.collection("staff").limit(1).get()) == 0
-    return tenders_empty and staff_empty
+    try:
+        tenders_empty = len(db.collection("tenders").limit(1).get(timeout=5.0)) == 0
+        staff_empty = len(db.collection("staff").limit(1).get(timeout=5.0)) == 0
+        return tenders_empty and staff_empty
+    except Exception as e:
+        raise ConnectionError(f"Failed to check if database is empty: {e}")
 
 
 # ── Write helpers ─────────────────────────────────────────────────────────────
